@@ -143,7 +143,7 @@ jobs:
           sed -i '1i #pragma GCC optimize ("no-cf-protection")' scripts/basic/fixdep.c
           
           make ${args}
-          make ${args}
+          
 
       - name: "💛 Upload Image.gz"
         uses: actions/upload-artifact@v4
