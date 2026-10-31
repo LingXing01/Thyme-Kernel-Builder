@@ -144,12 +144,17 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 终极补丁：强制取消 tasks.h 里的条件编译限制，防止报错 incomplete definition
+          # 1. 强行把 task_struct 里的 RCU 字段暴露出来
+          sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' include/linux/sched.h
+          sed -i 's/#if defined(CONFIG_TASKS_RCU)/#if 1/g' include/linux/sched.h
+          
+          # 2. 强行把 tasks.h 里的定义和逻辑暴露出来
           sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' kernel/rcu/tasks.h
           sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' kernel/rcu/tasks.h
           sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' kernel/rcu/tasks.h
+          sed -i 's/#if defined(CONFIG_TASKS_RCU)/#if 1/g' kernel/rcu/tasks.h
           
-          # 核心修改：在 make 后面直接强制传入 HOSTCFLAGS 和 KBUILD_HOSTCFLAGS
+          # 3. 继续编译
           make ${args} HOSTCFLAGS="-fcf-protection=none" KBUILD_HOSTCFLAGS="-fcf-protection=none"
 
       - name: "💛 Upload Image.gz"
