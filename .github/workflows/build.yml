@@ -119,6 +119,7 @@ jobs:
             args="$args CC=$CC"
           fi
           echo "args=$args" >> $GITHUB_OUTPUT
+          echo "KBUILD_HOSTCFLAGS=-fcf-protection=none" >> $GITHUB_ENV
 
       - name: "😋 Update ReSukiSU"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
@@ -156,6 +157,7 @@ jobs:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
           echo "PATH Variable: $PATH"
+          make ${args} KBUILD_CFLAGS="-fcf-protection=none"
           make ${args}
 
       - name: "💛 Upload Image"
