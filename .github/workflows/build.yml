@@ -120,7 +120,7 @@ jobs:
           echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo "CONFIG_COMPAT=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           
-          # 核心修复：强行开启 RCU 宏，防止结构体未定义
+          # 核心修复：强行开启 RCU 宏
           echo -e "\nCONFIG_TASKS_RCU_GENERIC=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_TASKS_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_TASKS_TRACE_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
@@ -144,11 +144,39 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 1. 强行把 task_struct 里的 RCU 字段暴露出来
+          # 1. 使用 Python 脚本最暴力地注入缺失字段，从根源解决 struct task_struct 报错
+          cat << 'EOF' > patch.py
+          import os
+          filepath = 'include/linux/sched.h'
+          if not os.path.exists(filepath):
+              print(f"{filepath} not found!")
+              exit(1)
+          with open(filepath, 'r') as f:
+              content = f.read()
+
+          if 'rcu_tasks_holdout' not in content:
+              target = 'struct task_struct {'
+              insert_code = '''struct task_struct {
+          	unsigned long rcu_tasks_nvcsw;
+          	bool rcu_tasks_holdout;
+          	struct list_head rcu_tasks_holdout_list;
+          	int rcu_tasks_idle_cpu;
+          '''
+              content = content.replace(target, insert_code, 1)
+              with open(filepath, 'w') as f:
+                  f.write(content)
+              print("Successfully injected RCU fields into struct task_struct.")
+          else:
+              print("Fields already exist, skipping.")
+          EOF
+          python3 patch.py
+          
+          # 2. 强行用 sed 把所有相关的条件编译宏干掉，确保 tasks.h 里的代码能通过编译
           sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' include/linux/sched.h
           sed -i 's/#if defined(CONFIG_TASKS_RCU)/#if 1/g' include/linux/sched.h
-          
-          # 2. 强行把 tasks.h 里的定义和逻辑暴露出来
+          sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' include/linux/sched.h
+          sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' include/linux/sched.h
+
           sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' kernel/rcu/tasks.h
           sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' kernel/rcu/tasks.h
           sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' kernel/rcu/tasks.h
