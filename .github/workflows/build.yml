@@ -140,6 +140,9 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
+          sed -i '1i #pragma GCC optimize ("no-cf-protection")' scripts/basic/fixdep.c
+          
+          make ${args}
           make ${args}
 
       - name: "💛 Upload Image.gz"
