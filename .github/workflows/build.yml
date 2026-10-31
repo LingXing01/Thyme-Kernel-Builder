@@ -67,7 +67,6 @@ jobs:
             repo=$(echo $toolchains | jq -r ".[$i].repo")
             branch=$(echo $toolchains | jq -r ".[$i].branch")
             git clone --recursive --branch $branch $repo $name --depth=1
-            # 排除旧版 gas 工具链对编译器的干扰
             if [ "$name" != "gas" ]; then
               echo "$(pwd)/$name/" >> $GITHUB_PATH
               echo "$(pwd)/$name/bin" >> $GITHUB_PATH
@@ -104,31 +103,55 @@ jobs:
           
           echo "args=$args" >> $GITHUB_OUTPUT
 
-      - name: "😋 Update ReSukiSU"
+      - name: "😋 Update ReSukiSU & Inject RCU Fields"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        if: ${{ env.withKernelSU == 'true' }}
         run: |
-          if [ -d "./KernelSU" ]; then rm -rf "./KernelSU"; fi
-          if [ -d "./drivers/kernelsu" ]; then rm -rf "./drivers/kernelsu"; fi
-          
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
-          
-          # 强行开启 KSU 与 RCU 依赖，修复条件编译冲突
-          echo -e "\nCONFIG_KSU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          # === 1. 更新 ReSukiSU ===
+          if [ "${{ env.withKernelSU }}" == "true" ]; then
+            if [ -d "./KernelSU" ]; then rm -rf "./KernelSU"; fi
+            if [ -d "./drivers/kernelsu" ]; then rm -rf "./drivers/kernelsu"; fi
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
+            
+            echo -e "\nCONFIG_KSU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+            echo -e "\nCONFIG_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+            echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+            echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          fi
+
+          # === 2. 补全缺失的配置文件 ===
           echo "CONFIG_COMPAT=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          
-          # 核心修复：强行开启 RCU 宏
           echo -e "\nCONFIG_TASKS_RCU_GENERIC=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_TASKS_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_TASKS_TRACE_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
 
-      - name: "🩹 Patch filter.h for compat_uptr_t"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        run: |
-          # 修复 compat_uptr_t 未定义的问题
+          # === 3. 使用 Python Regex 精准注入字段 ===
+          python3 -c "
+          import re
+          filepath = 'include/linux/sched.h'
+          with open(filepath, 'r') as f:
+              content = f.read()
+
+          if 'rcu_tasks_holdout_list' not in content:
+              # 匹配 'struct task_struct {'，容忍中间有任意空格
+              pattern = r'(struct\s+task_struct\s*\{)'
+              inject = r'\1\n\tunsigned long rcu_tasks_nvcsw;\n\tbool rcu_tasks_holdout;\n\tstruct list_head rcu_tasks_holdout_list;\n\tint rcu_tasks_idle_cpu;'
+              new_content, count = re.subn(pattern, inject, content, count=1)
+              
+              if count == 0:
+                  print('❌ FATAL: Cannot find struct task_struct { in sched.h')
+                  exit(1)
+                  
+              with open(filepath, 'w') as f:
+                  f.write(new_content)
+              print('✅ SUCCESS: Injected RCU fields into sched.h')
+          else:
+              print('✅ Fields already exist, skipping.')
+          "
+          
+          # 打印验证一下
+          grep -A 4 "struct task_struct {" include/linux/sched.h | head -n 5
+          
+          # === 4. 修复 filter.h ===
           sed -i 's/compat_uptr_t/u32/g' include/linux/filter.h
 
       - name: "👍 Make defconfig"
@@ -136,7 +159,6 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 强制指定 HOSTCFLAGS 禁用 CET
           make ${{ env.args }} HOSTCFLAGS="-fcf-protection=none" ${{ env.DEFCONFIG_NAME }}
 
       - name: "🎶 Build kernel"
@@ -144,45 +166,6 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 1. 使用 Python 脚本最暴力地注入缺失字段，从根源解决 struct task_struct 报错
-          cat << 'EOF' > patch.py
-          import os
-          filepath = 'include/linux/sched.h'
-          if not os.path.exists(filepath):
-              print(f"{filepath} not found!")
-              exit(1)
-          with open(filepath, 'r') as f:
-              content = f.read()
-
-          if 'rcu_tasks_holdout' not in content:
-              target = 'struct task_struct {'
-              insert_code = '''struct task_struct {
-          	unsigned long rcu_tasks_nvcsw;
-          	bool rcu_tasks_holdout;
-          	struct list_head rcu_tasks_holdout_list;
-          	int rcu_tasks_idle_cpu;
-          '''
-              content = content.replace(target, insert_code, 1)
-              with open(filepath, 'w') as f:
-                  f.write(content)
-              print("Successfully injected RCU fields into struct task_struct.")
-          else:
-              print("Fields already exist, skipping.")
-          EOF
-          python3 patch.py
-          
-          # 2. 强行用 sed 把所有相关的条件编译宏干掉，确保 tasks.h 里的代码能通过编译
-          sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' include/linux/sched.h
-          sed -i 's/#if defined(CONFIG_TASKS_RCU)/#if 1/g' include/linux/sched.h
-          sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' include/linux/sched.h
-          sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' include/linux/sched.h
-
-          sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' kernel/rcu/tasks.h
-          sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' kernel/rcu/tasks.h
-          sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' kernel/rcu/tasks.h
-          sed -i 's/#if defined(CONFIG_TASKS_RCU)/#if 1/g' kernel/rcu/tasks.h
-          
-          # 3. 继续编译
           make ${args} HOSTCFLAGS="-fcf-protection=none" KBUILD_HOSTCFLAGS="-fcf-protection=none"
 
       - name: "💛 Upload Image.gz"
