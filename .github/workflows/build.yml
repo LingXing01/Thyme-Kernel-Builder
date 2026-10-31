@@ -26,7 +26,6 @@ jobs:
 
   Build-Kernel:
     name: "🐎 Build kernel"
-    # 将底层环境从最新的 24.04 改为 22.04，避开新版 GCC 强制的 CET 保护
     runs-on: ubuntu-22.04
     needs:
       - Set-repos
@@ -68,8 +67,11 @@ jobs:
             repo=$(echo $toolchains | jq -r ".[$i].repo")
             branch=$(echo $toolchains | jq -r ".[$i].branch")
             git clone --recursive --branch $branch $repo $name --depth=1
-            echo "$(pwd)/$name/" >> $GITHUB_PATH
-            echo "$(pwd)/$name/bin" >> $GITHUB_PATH
+            # 如果是 gas，不把它加入 PATH，避免污染宿主机编译
+            if [ "$name" != "gas" ]; then
+              echo "$(pwd)/$name/" >> $GITHUB_PATH
+              echo "$(pwd)/$name/bin" >> $GITHUB_PATH
+            fi
           done
 
       - name: "😎 Set args"
@@ -108,42 +110,29 @@ jobs:
         run: |
           if [ -d "./KernelSU" ]; then rm -rf "./KernelSU"; fi
           if [ -d "./drivers/kernelsu" ]; then rm -rf "./drivers/kernelsu"; fi
+          
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
+          
           echo -e "\nCONFIG_KSU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-
-      - name: "🩹 Patch Makefile for CET"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        run: |
-          # 直接修改内核根目录的 Makefile，追加禁用 CET 的参数
-          sed -i '/^HOSTCFLAGS/a HOSTCFLAGS += -fcf-protection=none' Makefile
-          sed -i '/^KBUILD_HOSTCFLAGS/a KBUILD_HOSTCFLAGS += -fcf-protection=none' Makefile
-          
-          # 清理可能残留的编译中间文件，确保 Makefile 的修改能够生效
-          make clean || true
-          rm -rf ./${{ env.OUT_DIR }} || true
-          
-          # 打印出修改后的内容，方便在日志里确认是否打上了补丁
-          grep -n "fcf-protection=none" Makefile
 
       - name: "👍 Make defconfig"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
+          # 强制指定 HOSTCFLAGS 禁用 CET
+          make ${{ env.args }} HOSTCFLAGS="-fcf-protection=none" ${{ env.DEFCONFIG_NAME }}
 
       - name: "🎶 Build kernel"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          sed -i '1i #pragma GCC optimize ("no-cf-protection")' scripts/basic/fixdep.c
-          
-          make ${args}
-          
+          # 核心修改：在 make 后面直接强制传入 HOSTCFLAGS 和 KBUILD_HOSTCFLAGS
+          make ${args} HOSTCFLAGS="-fcf-protection=none" KBUILD_HOSTCFLAGS="-fcf-protection=none"
 
       - name: "💛 Upload Image.gz"
         uses: actions/upload-artifact@v4
