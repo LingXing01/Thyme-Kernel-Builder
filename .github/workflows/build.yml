@@ -133,7 +133,7 @@ jobs:
           fi
 
           # 使用 ReSukiSU 官方脚本，并指定 legacy 模式以兼容 4.19
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s legacy
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
           # 强制启用 KSU 及依赖配置
           echo -e "\nCONFIG_KSU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
@@ -150,6 +150,12 @@ jobs:
         run: |
           echo "PATH Variable: $PATH"
           make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
+
+      - name: "Patch Makefile to disable CET"
+        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
+        run: |
+          sed -i '/^KBUILD_CFLAGS/a KBUILD_CFLAGS += -fcf-protection=none' Makefile
+          sed -i '/^HOSTCFLAGS/a HOSTCFLAGS += -fcf-protection=none' Makefile
 
       - name: "🎶 Build kernel"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
