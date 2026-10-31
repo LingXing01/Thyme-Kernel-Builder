@@ -67,6 +67,7 @@ jobs:
             repo=$(echo $toolchains | jq -r ".[$i].repo")
             branch=$(echo $toolchains | jq -r ".[$i].branch")
             git clone --recursive --branch $branch $repo $name --depth=1
+            # 排除旧版 gas 工具链对编译器的干扰
             if [ "$name" != "gas" ]; then
               echo "$(pwd)/$name/" >> $GITHUB_PATH
               echo "$(pwd)/$name/bin" >> $GITHUB_PATH
@@ -112,20 +113,22 @@ jobs:
           
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
           
+          # 强行开启 KSU 与 RCU 依赖，修复条件编译冲突
           echo -e "\nCONFIG_KSU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo "CONFIG_COMPAT=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           
-          # 解决 RCU 条件编译报错（强行理顺依赖关系）
+          # 核心修复：强行开启 RCU 宏，防止结构体未定义
+          echo -e "\nCONFIG_TASKS_RCU_GENERIC=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
           echo -e "\nCONFIG_TASKS_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_TINY_RCU=n" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_TASKS_TRACE_RCU=n" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo -e "\nCONFIG_TASKS_TRACE_RCU=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+
       - name: "🩹 Patch filter.h for compat_uptr_t"
         working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
         run: |
-          # 直接把未定义的类型替换为底层基础类型 u32，完美绕过头文件循环包含问题
+          # 修复 compat_uptr_t 未定义的问题
           sed -i 's/compat_uptr_t/u32/g' include/linux/filter.h
 
       - name: "👍 Make defconfig"
@@ -133,6 +136,7 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
+          # 强制指定 HOSTCFLAGS 禁用 CET
           make ${{ env.args }} HOSTCFLAGS="-fcf-protection=none" ${{ env.DEFCONFIG_NAME }}
 
       - name: "🎶 Build kernel"
@@ -140,7 +144,12 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 加长超时时间，内核编译很慢
+          # 终极补丁：强制取消 tasks.h 里的条件编译限制，防止报错 incomplete definition
+          sed -i 's/#ifdef CONFIG_TASKS_RCU_GENERIC/#if 1/g' kernel/rcu/tasks.h
+          sed -i 's/#if defined(CONFIG_TASKS_RCU_GENERIC)/#if 1/g' kernel/rcu/tasks.h
+          sed -i 's/#ifdef CONFIG_TASKS_RCU/#if 1/g' kernel/rcu/tasks.h
+          
+          # 核心修改：在 make 后面直接强制传入 HOSTCFLAGS 和 KBUILD_HOSTCFLAGS
           make ${args} HOSTCFLAGS="-fcf-protection=none" KBUILD_HOSTCFLAGS="-fcf-protection=none"
 
       - name: "💛 Upload Image.gz"
