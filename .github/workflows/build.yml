@@ -131,9 +131,10 @@ jobs:
         env:
           args: ${{ steps.generate-args.outputs.args }}
         run: |
-          # 核心修改：在 make 后面直接强制传入 HOSTCFLAGS 和 KBUILD_HOSTCFLAGS
+          sed -i '/#include <linux\/skbuff.h>/a #include <linux\/compat.h>' include/linux/filter.h
+          sed -i 's/#if defined(CONFIG_COMPAT)/#if defined(CONFIG_COMPAT) || 1/' include/net/compat.h
+          
           make ${args} HOSTCFLAGS="-fcf-protection=none" KBUILD_HOSTCFLAGS="-fcf-protection=none"
-
       - name: "💛 Upload Image.gz"
         uses: actions/upload-artifact@v4
         with:
